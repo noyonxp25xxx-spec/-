@@ -1,0 +1,114 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function getUserRole() {
+      return isAuthenticated() ? getUserData().role : null;
+    }
+
+    function isCeo() {
+      return getUserRole() == 'CEO' && getUserData().status == 'ACTIVE';
+    }
+
+    function isEmployee() {
+      return (getUserRole() == 'EMPLOYEE' || getUserRole() == 'CEO') && getUserData().status == 'ACTIVE';
+    }
+
+    function isMaintenance() {
+      return (getUserRole() == 'MAINTENANCE' || getUserRole() == 'CEO') && getUserData().status == 'ACTIVE';
+    }
+
+    // Default deny all access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Public Collections: Published Notices and Activities can be read by anyone
+    match /publicNotices/{noticeId} {
+      allow read: if resource.data.isPublished == true || isMaintenance();
+      allow write: if isMaintenance();
+    }
+
+    match /publicActivities/{activityId} {
+      allow read: if resource.data.isPublished == true || isMaintenance();
+      allow write: if isMaintenance();
+    }
+
+    match /homepageSettings/{settingId} {
+      allow read: if true;
+      allow write: if isMaintenance();
+    }
+
+    // Users collection: Only CEO can create/update roles and accounts. Users can read own profile.
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isCeo());
+      allow create, update, delete: if isCeo();
+    }
+
+    // Employees profile & records: Only CEO can write; employees can read their own
+    match /employees/{employeeId} {
+      allow read: if isAuthenticated() && (isCeo() || (isEmployee() && resource.data.userId == request.auth.uid));
+      allow write: if isCeo();
+    }
+
+    // Members collection: Employees and CEO can read. Only CEO/Server can create or update.
+    match /members/{memberId} {
+      allow read: if isAuthenticated() && isEmployee();
+      allow create, update: if isCeo();
+      allow delete: if false; // Members cannot be hard deleted
+    }
+
+    // Accounts / Member Balances: READ ONLY for employees & CEO. Write ONLY through secure server logic!
+    match /accounts/{accountId} {
+      allow read: if isAuthenticated() && isEmployee();
+      allow write: if false; // Only server Firebase Admin SDK can modify balances!
+    }
+
+    // Transactions: 
+    // - Employees can create new PENDING transactions
+    // - Employees can read transactions they submitted
+    // - CEO can read all and manage approvals through server
+    // - Balance updates MUST happen server-side
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated() && (
+        isCeo() || 
+        (isEmployee() && resource.data.submittedByUserId == request.auth.uid)
+      );
+      // Employees can only submit new transactions in PENDING status
+      allow create: if isAuthenticated() && isEmployee() && 
+        request.resource.data.status == 'PENDING' &&
+        request.resource.data.submittedByUserId == request.auth.uid &&
+        request.resource.data.amountPoisha > 0;
+      // No client can directly edit, approve, or delete transactions
+      allow update, delete: if false;
+    }
+
+    // Ledger Entries: Immutable double-entry style financial records.
+    // Client write is STRICTLY FORBIDDEN. Managed exclusively by Admin SDK.
+    match /ledgerEntries/{entryId} {
+      allow read: if isAuthenticated() && isCeo();
+      allow write: if false;
+    }
+
+    // Audit Logs: Server-only write. Read-only for CEO.
+    match /auditLogs/{logId} {
+      allow read: if isAuthenticated() && isCeo();
+      allow write: if false; // Only server Firebase Admin SDK can write audit logs
+    }
+
+    // Organization Settings
+    match /organizationSettings/{settingId} {
+      allow read: if isAuthenticated();
+      allow write: if isCeo();
+    }
+  }
+}
